@@ -1,0 +1,276 @@
+# main.py
+import sys
+import os
+import json
+import pandas as pd
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import Qt
+from openpyxl import load_workbook
+
+# ---------- 资源路径兼容 PyInstaller ----------
+def resource_path(relative_path: str) -> str:
+    """返回资源文件的绝对路径（兼容打包后）"""
+    try:
+        base_path = sys._MEIPASS          # PyInstaller 临时目录
+    except AttributeError:
+        base_path = os.path.abspath(".")  # 开发环境
+    return os.path.join(base_path, relative_path)
+
+# ---------- 业务逻辑 ----------
+class ExcelProcessor:
+    def __init__(self):
+        self.formula_lib = self.load_formula_lib()
+
+    # 读公式库
+    def load_formula_lib(self):
+        try:
+            with open(resource_path("excel_formulas.json"), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    # 写公式库
+    def save_formula_lib(self):
+        with open(resource_path("excel_formulas.json"), "w", encoding="utf-8") as f:
+            json.dump(self.formula_lib, f, indent=2, ensure_ascii=False)
+
+    def add_formula(self, name, formula, description):
+        self.formula_lib[name] = {"formula": formula, "description": description}
+        self.save_formula_lib()
+
+    def remove_formula(self, name):
+        if name in self.formula_lib:
+            del self.formula_lib[name]
+            self.save_formula_lib()
+            return True
+        return False
+
+    # 合并表
+    def merge_tables(self, file_paths, merge_columns, output_path):
+        merged_df = pd.DataFrame()
+        for file in file_paths:
+            try:
+                xls = pd.ExcelFile(file)
+                for sheet in xls.sheet_names:
+                    df = pd.read_excel(file, sheet_name=sheet)
+                    missing = [c for c in merge_columns if c not in df.columns]
+                    if missing:
+                        continue
+                    merged_df = pd.concat([merged_df, df[merge_columns]], ignore_index=True)
+            except Exception as e:
+                print(f"处理 {file} 失败：{e}")
+        merged_df.to_excel(output_path, index=False)
+        return merged_df, output_path
+
+    # 应用公式
+    def apply_formula(self, file_path, formula, target_col, new_col_name):
+        try:
+            wb = load_workbook(file_path)
+            ws = wb.active
+            col_idx = None
+            for cell in ws[1]:
+                if cell.value == target_col:
+                    col_idx = cell.column_letter
+            if not col_idx:
+                return False, f"未找到列：{target_col}"
+
+            new_col_idx = ws.max_column + 1
+            ws.cell(row=1, column=new_col_idx, value=new_col_name)
+            for row in range(2, ws.max_row + 1):
+                ws.cell(row=row, column=new_col_idx, value=f"={formula.replace('@', f'{col_idx}{row}')}")
+
+            base, ext = os.path.splitext(file_path)
+            wb.save(f"{base}_backup{ext}")
+            wb.save(file_path)
+            return True, f"成功！已备份：{os.path.basename(file_path)}_backup{ext}"
+        except Exception as e:
+            return False, str(e)
+
+# ---------- 主界面 ----------
+class ExcelToolsApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.processor = ExcelProcessor()
+        self.merge_files = []
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle("Excel 工具箱")
+        self.resize(1000, 700)
+
+        tabs = QTabWidget()
+        self.setCentralWidget(tabs)
+
+        # 1. 合并
+        merge_tab = QWidget()
+        vbox = QVBoxLayout()
+
+        # 文件列表
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
+        vbox.addWidget(QLabel("已选文件："))
+        vbox.addWidget(self.file_list)
+
+        hbox = QHBoxLayout()
+        hbox.addWidget(QPushButton("添加", clicked=self.add_merge_files))
+        hbox.addWidget(QPushButton("移除", clicked=self.remove_merge_files))
+        hbox.addWidget(QPushButton("清空", clicked=self.clear_merge_files))
+        vbox.addLayout(hbox)
+
+        # 列选择
+        self.col_list = QListWidget()
+        self.col_list.setSelectionMode(QListWidget.MultiSelection)
+        vbox.addWidget(QLabel("选择列："))
+        vbox.addWidget(self.col_list)
+        vbox.addWidget(QPushButton("刷新列", clicked=self.refresh_columns))
+
+        # 输出
+        hbox2 = QHBoxLayout()
+        self.out_edit = QLineEdit()
+        self.out_edit.setPlaceholderText("输出路径")
+        hbox2.addWidget(self.out_edit)
+        hbox2.addWidget(QPushButton("浏览...", clicked=self.browse_out))
+        vbox.addLayout(hbox2)
+
+        vbox.addWidget(QPushButton("合并", clicked=self.do_merge))
+        merge_tab.setLayout(vbox)
+
+        # 2. 公式应用
+        formula_tab = QWidget()
+        vbox2 = QVBoxLayout()
+
+        file_edit = QLineEdit()
+        file_edit.setPlaceholderText("选择 Excel 文件")
+        browse_btn = QPushButton("浏览...")
+        browse_btn.clicked.connect(lambda: file_edit.setText(QFileDialog.getOpenFileName(self, "选择文件", "", "Excel 文件 (*.xlsx)")[0]))
+        vbox2.addWidget(file_edit)
+        vbox2.addWidget(browse_btn)
+
+        self.col_combo = QComboBox()
+        self.form_combo = QComboBox()
+        self.form_combo.addItems(list(self.processor.formula_lib.keys()) + ["自定义"])
+        self.form_edit = QLineEdit()
+        self.form_edit.setPlaceholderText("公式（如 @*0.1）")
+        self.new_col_edit = QLineEdit()
+        self.new_col_edit.setPlaceholderText("新列名")
+
+        vbox2.addWidget(QLabel("目标列："))
+        vbox2.addWidget(self.col_combo)
+        vbox2.addWidget(QLabel("公式："))
+        vbox2.addWidget(self.form_combo)
+        vbox2.addWidget(self.form_edit)
+        vbox2.addWidget(QLabel("新列名："))
+        vbox2.addWidget(self.new_col_edit)
+
+        apply_btn = QPushButton("应用公式")
+        apply_btn.clicked.connect(lambda: self.apply_formula(file_edit.text()))
+        vbox2.addWidget(apply_btn)
+        formula_tab.setLayout(vbox2)
+
+        # 3. 公式库管理
+        lib_tab = QWidget()
+        vbox3 = QVBoxLayout()
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["名称", "公式", "描述"])
+        self.load_formula_table()
+        vbox3.addWidget(self.table)
+
+        add_btn = QPushButton("添加")
+        add_btn.clicked.connect(self.add_formula_dialog)
+        del_btn = QPushButton("删除")
+        del_btn.clicked.connect(self.del_formula)
+        vbox3.addWidget(add_btn)
+        vbox3.addWidget(del_btn)
+        lib_tab.setLayout(vbox3)
+
+        tabs.addTab(merge_tab, "合并")
+        tabs.addTab(formula_tab, "公式")
+        tabs.addTab(lib_tab, "公式库")
+
+    # ---------- 合并相关 ----------
+    def add_merge_files(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "选择 Excel 文件", "", "Excel (*.xlsx *.xls)")
+        for f in files:
+            if f not in self.merge_files:
+                self.merge_files.append(f)
+                self.file_list.addItem(os.path.basename(f))
+
+    def remove_merge_files(self):
+        for item in self.file_list.selectedItems():
+            row = self.file_list.row(item)
+            self.file_list.takeItem(row)
+            del self.merge_files[row]
+
+    def clear_merge_files(self):
+        self.merge_files.clear()
+        self.file_list.clear()
+
+    def browse_out(self):
+        path, _ = QFileDialog.getSaveFileName(self, "保存合并结果", "", "Excel (*.xlsx)")
+        if path:
+            self.out_edit.setText(path)
+
+    def refresh_columns(self):
+        if not self.merge_files:
+            QMessageBox.warning(self, "提示", "请先添加文件")
+            return
+        df = pd.read_excel(self.merge_files[0], nrows=0)
+        self.col_list.clear()
+        self.col_list.addItems(df.columns)
+
+    def do_merge(self):
+        cols = [item.text() for item in self.col_list.selectedItems()]
+        if not cols or not self.out_edit.text():
+            QMessageBox.warning(self, "提示", "请选择列并设置输出路径")
+            return
+        df, out = self.processor.merge_tables(self.merge_files, cols, self.out_edit.text())
+        QMessageBox.information(self, "完成", f"已合并 {len(df)} 行，保存至：{out}")
+
+    # ---------- 公式相关 ----------
+    def load_formula_table(self):
+        self.table.setRowCount(len(self.processor.formula_lib))
+        for i, (n, d) in enumerate(self.processor.formula_lib.items()):
+            self.table.setItem(i, 0, QTableWidgetItem(n))
+            self.table.setItem(i, 1, QTableWidgetItem(d["formula"]))
+            self.table.setItem(i, 2, QTableWidgetItem(d.get("description", "")))
+
+    def add_formula_dialog(self):
+        name, ok1 = QInputDialog.getText(self, "添加公式", "名称：")
+        if not ok1 or not name.strip():
+            return
+        formula, ok2 = QInputDialog.getText(self, "添加公式", "公式（用@表示列）：")
+        if not ok2 or "@" not in formula:
+            QMessageBox.warning(self, "提示", "公式必须包含@")
+            return
+        desc, ok3 = QInputDialog.getText(self, "添加公式", "描述（可选）：")
+        self.processor.add_formula(name.strip(), formula.strip(), desc.strip())
+        self.load_formula_table()
+
+    def del_formula(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        name = self.table.item(row, 0).text()
+        self.processor.remove_formula(name)
+        self.load_formula_table()
+
+    def apply_formula(self, file_path):
+        if not file_path or not os.path.exists(file_path):
+            QMessageBox.warning(self, "提示", "请选择有效文件")
+            return
+        col = self.col_combo.currentText()
+        formula = self.form_edit.text()
+        new_col = self.new_col_edit.text()
+        if not (col and formula and new_col and "@" in formula):
+            QMessageBox.warning(self, "提示", "请完整填写")
+            return
+        ok, msg = self.processor.apply_formula(file_path, formula, col, new_col)
+        QMessageBox.information(self, "结果", msg)
+
+# ---------- 启动 ----------
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    win = ExcelToolsApp()
+    win.show()
+    sys.exit(app.exec_())
