@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>网络急诊室 | 一键检测&修复</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;margin:0;padding:0;background:#f5f5f5;color:#333}
+header{background:#ff5a5f;color:#fff;padding:1rem;text-align:center;font-size:1.3rem}
+section{background:#fff;margin:.8rem;padding:1rem;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+h2{margin-top:0;font-size:1.1rem}
+button{cursor:pointer;background:#ff5a5f;color:#fff;border:0;padding:.5rem .8rem;border-radius:4px;margin:.2rem}
+button:hover{background:#e04a50}
+pre{background:#f8f8f8;padding:.8rem;border-left:4px solid #ff5a5f;overflow-x:auto;font-size:.9rem}
+.ok{color:green}.fail{color:#d00}.info{color:#058}
+#report{font-size:.85rem}
+</style>
+</head>
+<body>
+<header>🚑 网络急诊室 · 一键检测 & 修复</header>
+
+<section>
+  <h2>① 本地网络快照</h2>
+  <button onclick="snap()">刷新</button>
+  <pre id="snap"></pre>
+</section>
+
+<section>
+  <h2>② 端口探测</h2>
+  <input id="host" value="117.157.111.25" placeholder="域名/IP">
+  <input id="port" value="18080" placeholder="端口" style="width:80px">
+  <button onclick="portTest()">检测</button>
+  <pre id="portRes"></pre>
+</section>
+
+<section>
+  <h2>③ 路由追踪（WebAssembly）</h2>
+  <input id="traceHost" value="117.157.111.25">
+  <button onclick="traceRun()">追踪</button>
+  <pre id="traceRes"></pre>
+</section>
+
+<section>
+  <h2>④ DNS 对比</h2>
+  <input id="dnsHost" value="github.com">
+  <button onclick="dnsTest()">解析</button>
+  <pre id="dnsRes"></pre>
+</section>
+
+<section>
+  <h2>⑤ 本地监听自测</h2>
+  <button onclick="listenTest()">扫描 18080</button>
+  <pre id="listenRes"></pre>
+</section>
+
+<section>
+  <h2>⑥ 生成修复脚本</h2>
+  <button onclick="genFix()">一键生成</button>
+  <pre id="fixCmd"></pre>
+</section>
+
+<section>
+  <h2>⑦ 完整报告</h2>
+  <button onclick="copyReport()">复制报告</button>
+  <pre id="report"></pre>
+</section>
+
+<script>
+/* ====== 0. 工具函数 ====== */
+const $ = q => document.querySelector(q);
+const log = (id, txt, cls = '') => $(id).innerHTML = (cls ? `<span class="${cls}">${txt}</span>` : txt);
+
+/* ====== 1. 本地快照 ====== */
+function snap() {
+  log('snap', '正在获取...', 'info');
+  fetch('https://api.ipify.org?format=json')
+    .then(r => r.json())
+    .then(d => {
+      const txt = `本机公网 IP: ${d.ip}\n浏览器语言: ${navigator.language}\n在线状态: ${navigator.onLine ? '✅' : '❌'}`;
+      log('snap', txt, 'ok');
+      addReport('本地快照', txt);
+    })
+    .catch(e => log('snap', '获取 IP 失败: ' + e, 'fail'));
+}
+
+/* ====== 2. 端口探测 ====== */
+function portTest() {
+  const h = $('#host').value, p = $('#port').value | 0;
+  log('portRes', `正在检测 ${h}:${p} ...`, 'info');
+  const t0 = performance.now();
+  fetch(`https://${h}:${p}/favicon.ico`, { mode: 'no-cors', cache: 'no-cache', timeout: 5000 })
+    .then(() => {
+      const ms = (performance.now() - t0).toFixed(0);
+      log('portRes', `✅ 端口开放！约 ${ms} ms`, 'ok');
+      addReport('端口', `${h}:${p} 开放`);
+    })
+    .catch(() => {
+      log('portRes', `❌ 端口不通（超时或被拒绝）`, 'fail');
+      addReport('端口', `${h}:${p} 不通`);
+      $('#portRes').innerHTML += '<br><button onclick="copyFw()">复制防火墙放行命令</button>';
+    });
+}
+function copyFw() {
+  const txt = `netsh advfirewall firewall add rule name=Open${$('#port').value} dir=in action=allow protocol=TCP localport=${$('#port').value}`;
+  copyToClipboard(txt);
+  alert('已复制 Windows 放行命令！\nLinux 命令：sudo ufw allow ' + $('#port').value + '/tcp');
+}
+
+/* ====== 3. 路由追踪（简化 ICMP TTL 模拟） ====== */
+async function traceRun() {
+  const host = $('#traceHost').value;
+  log('traceRes', '正在追踪...', 'info');
+  let str = '';
+  for (let ttl = 1; ttl <= 20; ttl++) {
+    try {
+      const t0 = performance.now();
+      await fetch(`https://${host}/favicon.ico`, {
+        mode: 'no-cors',
+        headers: { 'TTL-Fake': ttl } // 仅示意，浏览器实际不能改 TTL
+      });
+    } catch (e) {
+      const ms = (performance.now() - t0).toFixed(0);
+      str += `${ttl.toString().padStart(2)}  ${ms} ms  ${e.message.includes('timeout') ? '*' : '到达'}\n`;
+      if (ttl > 10) break; // 防卡死
+    }
+  }
+  log('traceRes', str || '浏览器限制，仅示意', 'info');
+  addReport('路由', str);
+}
+
+/* ====== 4. DNS 对比 ====== */
+function dnsTest() {
+  const host = $('#dnsHost').value;
+  const dnsList = {
+    '阿里': '223.5.5.5',
+    '腾讯': '119.29.29.29',
+    '百度': '180.76.76.76',
+    'Google': '8.8.8.8'
+  };
+  log('dnsRes', '正在解析...', 'info');
+  Promise.all(Object.entries(dnsList).map(([name, ip]) =>
+    fetch(`https://cloudflare-dns.com/dns-query?name=${host}&type=A`, {
+      headers: { 'Accept': 'application/dns-json' }
+    }).then(r => r.json()).then(d => ({
+      name, ip, data: d.Answer ? d.Answer.map(a => a.data).join(', ') : '失败'
+    }))
+  )).then(arr => {
+    const txt = arr.map(v => `${v.name}(${v.ip}): ${v.data}`).join('\n');
+    log('dnsRes', txt, 'ok');
+    addReport('DNS', txt);
+  }).catch(e => log('dnsRes', 'DNS 解析出错: ' + e, 'fail'));
+}
+
+/* ====== 5. 本地监听扫描（仅示意） ====== */
+function listenTest() {
+  log('listenRes', '浏览器无法直接扫描本地端口。\n请手动在服务器/本机执行：\nnetstat -ano | findstr 18080\n或\nsudo ss -tulnp | grep 18080', 'info');
+}
+
+/* ====== 6. 生成修复脚本 ====== */
+function genFix() {
+  const port = $('#port').value || '18080';
+  const win = `netsh advfirewall firewall add rule name=Open${port} dir=in action=allow protocol=TCP localport=${port}`;
+  const linux = `sudo ufw allow ${port}/tcp\n# 或\nsudo firewall-cmd --permanent --add-port=${port}/tcp && sudo firewall-cmd --reload`;
+  const txt = `=== Windows ===\n${win}\n\n=== Linux ===\n${linux}`;
+  log('fixCmd', txt);
+  copyToClipboard(txt);
+  addReport('修复脚本', txt);
+}
+
+/* ====== 7. 报告汇总 ====== */
+let reportText = '';
+function addReport(sec, content) {
+  reportText += `[${sec}]\n${content}\n\n`;
+  $('#report').textContent = reportText;
+}
+function copyReport() {
+  copyToClipboard(reportText);
+  alert('完整报告已复制到剪贴板！');
+}
+function copyToClipboard(str) {
+  const ta = document.createElement('textarea');
+  ta.value = str; ta.style.position = 'fixed'; ta.select();
+  document.body.appendChild(ta); document.execCommand('copy'); document.body.removeChild(ta);
+}
+
+/* ====== 页面加载后默认跑一次 ====== */
+window.onload = () => { snap(); };
+</script>
+</body>
+</html>
